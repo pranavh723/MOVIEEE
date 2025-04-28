@@ -24,7 +24,7 @@ DB_FILE = os.getenv("DATABASE_FILE", "movies.db")  # Default to 'movies.db' if n
 JOB_INTERVAL = int(os.getenv("JOB_INTERVAL", 1800))  # Default to 30 minutes
 CHANNEL_CHAT_ID = os.getenv("CHANNEL_CHAT_ID")  # Private/public channel chat ID
 CHANNEL_LINK = os.getenv("CHANNEL_LINK")  # Public channel link (optional)
-
+LAST_UPDATE_ID_FILE = "last_update_id.txt"
 # Mandatory configuration validation
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN is not set. Please check your .env file.")
