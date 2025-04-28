@@ -6,7 +6,7 @@ import requests
 import time
 from typing import List, Optional, Tuple
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters, CallbackContext
 from telegram.error import TelegramError, RetryAfter, BadRequest, Unauthorized, Conflict
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
@@ -70,28 +70,29 @@ class DatabaseManager:
                             id INTEGER PRIMARY KEY,
                             normalized_name TEXT UNIQUE,
                             details TEXT,
-                            file_id TEXT
+                            file_id TEXT,
+                            msg_id INTEGER
                         )''')
             conn.commit()
 
-    def get_all_movies(self) -> List[Tuple[str, str, str]]:
+    def get_all_movies(self) -> List[Tuple[str, str, str, int]]:
         """Fetch all movies from the database."""
         with sqlite3.connect(self.db_file) as conn:
             c = conn.cursor()
-            c.execute("SELECT normalized_name, details, file_id FROM movies")
+            c.execute("SELECT normalized_name, details, file_id, msg_id FROM movies")
             return c.fetchall()
 
-    def insert_movies(self, movies: List[Tuple[str, str, str]]) -> None:
+    def insert_movies(self, movies: List[Tuple[str, str, str, int]]) -> None:
         """Insert multiple movies into the database."""
         try:
             with sqlite3.connect(self.db_file) as conn:
                 c = conn.cursor()
-                c.executemany("INSERT OR IGNORE INTO movies (normalized_name, details, file_id) VALUES (?, ?, ?)", movies)
+                c.executemany("INSERT OR IGNORE INTO movies (normalized_name, details, file_id, msg_id) VALUES (?, ?, ?, ?)", movies)
                 conn.commit()
         except sqlite3.Error as e:
             logging.error(f"Database error during batch insert: {e}")
 
-# API Functions
+# Normalize movie name
 def normalize_movie_name(caption: str) -> str:
     """Normalize a movie name by cleaning up the caption."""
     name = re.sub(r'[^\w\s]', ' ', caption)  # Remove special characters
@@ -103,6 +104,7 @@ def normalize_movie_name(caption: str) -> str:
         name = f"{name} ({year})"
     return name
 
+# Fetch details from OMDb
 def fetch_movie_details_from_omdb(movie_name: str) -> str:
     """Fetch movie details online using the OMDb API."""
     url = f"http://www.omdbapi.com/?t={movie_name}&apikey={OMDB_API_KEY}"
@@ -126,7 +128,7 @@ def fetch_movie_details_from_omdb(movie_name: str) -> str:
         logging.error(f"Error fetching data from OMDb API: {e}")
         return "Error fetching movie details."
 
-# Job Functions
+# Fetch movies from channel
 def fetch_movies_from_channel(context: CallbackContext, db_manager: DatabaseManager) -> None:
     """Fetch movie files and captions from the private Telegram channel."""
     bot = context.bot
@@ -165,12 +167,33 @@ def fetch_movies_from_channel(context: CallbackContext, db_manager: DatabaseMana
                 if online_details:
                     details = online_details
 
-            movies_to_insert.append((normalized_name, details, document.file_id))
+            movies_to_insert.append((normalized_name, details, document.file_id, update.message.message_id))
 
     if movies_to_insert:
         db_manager.insert_movies(movies_to_insert)
 
-# Main Function
+# Search and send movie
+def search_movie(update: Update, context: CallbackContext, db_manager: DatabaseManager) -> None:
+    """Search for a movie in the database and forward it to the user."""
+    movie_name = update.message.text.strip()
+    movies = db_manager.get_all_movies()
+
+    # Search for the movie in the database
+    movie = next((m for m in movies if m[0].lower() == movie_name.lower()), None)
+
+    if movie:
+        details = movie[1]
+        file_id = movie[2]
+
+        # Send movie details
+        update.message.reply_text(f"Details for {movie_name}:\n{details}")
+
+        # Forward the movie file
+        context.bot.send_document(chat_id=update.message.chat_id, document=file_id)
+    else:
+        update.message.reply_text("Movie not found in the database. Please try another name.")
+
+# Main function
 def main() -> None:
     """Main function to run the bot."""
     db_manager = DatabaseManager(DB_FILE)
@@ -179,9 +202,10 @@ def main() -> None:
     dp = updater.dispatcher
 
     # Add command handlers
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("fetch", lambda update, context: fetch_movies(update, context, db_manager)))
-    dp.add_handler(CallbackQueryHandler(lambda update, context: button(update, context, db_manager)))
+    dp.add_handler(CommandHandler("start", lambda update, context: update.message.reply_text("Welcome to Movie Bot! Enter a movie name to get details.")))
+
+    # Add message handler for movie search
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, lambda update, context: search_movie(update, context, db_manager)))
 
     # Schedule jobs
     job_queue = updater.job_queue
