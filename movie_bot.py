@@ -7,7 +7,7 @@ import time
 from typing import List, Optional, Tuple
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
-from telegram.error import TelegramError, RetryAfter, BadRequest, Unauthorized
+from telegram.error import TelegramError, RetryAfter, BadRequest, Unauthorized, Conflict
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 
@@ -25,6 +25,7 @@ JOB_INTERVAL = int(os.getenv("JOB_INTERVAL", 1800))  # Default to 30 minutes
 CHANNEL_CHAT_ID = os.getenv("CHANNEL_CHAT_ID")  # Private/public channel chat ID
 CHANNEL_LINK = os.getenv("CHANNEL_LINK")  # Public channel link (optional)
 LAST_UPDATE_ID_FILE = "last_update_id.txt"
+
 # Mandatory configuration validation
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN is not set. Please check your .env file.")
@@ -40,8 +41,12 @@ model = SentenceTransformer('all-MiniLM-L6-v2')  # Lightweight model for embeddi
 def get_last_update_id() -> Optional[int]:
     """Retrieve the last update ID from the file."""
     if os.path.exists(LAST_UPDATE_ID_FILE):
-        with open(LAST_UPDATE_ID_FILE, "r") as file:
-            return int(file.read().strip())
+        try:
+            with open(LAST_UPDATE_ID_FILE, "r") as file:
+                return int(file.read().strip())
+        except ValueError:
+            logging.error("Error reading LAST_UPDATE_ID_FILE. Resetting to None.")
+            return None
     return None
 
 def save_last_update_id(update_id: int) -> None:
@@ -121,37 +126,6 @@ def fetch_movie_details_from_omdb(movie_name: str) -> str:
         logging.error(f"Error fetching data from OMDb API: {e}")
         return "Error fetching movie details."
 
-# Bot Command Handlers
-def start(update: Update, context: CallbackContext) -> None:
-    """Handle the /start command."""
-    update.message.reply_text(
-        "Welcome to the Movie Bot! Use /fetch to get the latest movies from the channel."
-        "\n\n"
-        f"Channel Link: {CHANNEL_LINK or 'Unavailable'}"
-    )
-
-def fetch_movies(update: Update, context: CallbackContext, db_manager: DatabaseManager) -> None:
-    """Fetch and display movies from the database."""
-    movies = db_manager.get_all_movies()
-    if not movies:
-        update.message.reply_text("No movies found in the database.")
-        return
-
-    keyboard = []
-    for movie in movies:
-        keyboard.append([InlineKeyboardButton(movie[0], callback_data=movie[0])])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("Select a movie to see details:", reply_markup=reply_markup)
-
-def button(update: Update, context: CallbackContext, db_manager: DatabaseManager) -> None:
-    """Handle button clicks for movie selection."""
-    query = update.callback_query
-    query.answer()
-    movie_name = query.data
-    movie_details = next((m[1] for m in db_manager.get_all_movies() if m[0] == movie_name), "Details not found.")
-    query.edit_message_text(text=f"Details for {movie_name}:\n{movie_details}")
-
 # Job Functions
 def fetch_movies_from_channel(context: CallbackContext, db_manager: DatabaseManager) -> None:
     """Fetch movie files and captions from the private Telegram channel."""
@@ -165,6 +139,9 @@ def fetch_movies_from_channel(context: CallbackContext, db_manager: DatabaseMana
     except RetryAfter as e:
         logging.error(f"Rate limit exceeded. Retrying after {e.retry_after} seconds.")
         time.sleep(e.retry_after)
+        return
+    except Conflict:
+        logging.error("Another bot instance is running. Exiting.")
         return
     except Unauthorized:
         logging.error(f"Invalid or inaccessible chat_id: {chat_id}.")
@@ -211,7 +188,10 @@ def main() -> None:
     job_queue.run_repeating(lambda context: fetch_movies_from_channel(context, db_manager), interval=JOB_INTERVAL, first=10)
 
     # Start polling
-    updater.start_polling()
+    try:
+        updater.start_polling()
+    except Conflict:
+        logging.error("Bot instance conflict detected. Ensure only one instance is running.")
     updater.idle()
 
 if __name__ == "__main__":
